@@ -9,3 +9,5 @@ CREATE TABLE IF NOT EXISTS audit LIKE datasets;
 
 CREATE TABLE IF NOT EXISTS schedules LIKE datasets;
 CREATE TABLE IF NOT EXISTS delivery_snapshots LIKE datasets;
+
+CREATE TABLE IF NOT EXISTS merges LIKE datasets;

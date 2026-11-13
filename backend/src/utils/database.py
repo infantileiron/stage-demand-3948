@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 from src.config.settings import settings
 
-TABLES = ("datasets", "scenarios", "runs", "plans", "reports", "users", "audit", "schedules", "delivery_snapshots")
+TABLES = ("datasets", "scenarios", "runs", "plans", "reports", "users", "audit", "schedules", "delivery_snapshots", "merges")
 _lock = threading.Lock()
 
 @contextmanager

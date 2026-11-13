@@ -14,7 +14,7 @@
 2. **历史观测**：观测档案、样本明细、结构化JSON导入与重复/容量校验。
 3. **情景预演**：观测集、场馆、7/14天、周末特别场、引导员承载数。
 4. **回测与解释**：队列状态、三次前移验证、最终14天回测、未来区间、生成编排建议。
-5. **值班编排**：主管确认、固定纪要、带中文表头的CSV导出。
+5. **值班编排**：主管确认、固定纪要、带中文表头的CSV导出；三厅共用引导员池时合并同日期范围的已完成预演。
 6. **报送计划**：每日北京时间计划、主管启停、下次/上次运行、历史快照下载。
 
 共享 `DemandChart` 与 `RunStrip` 用于手记和结果页；`ForecastTable` 用于结果与编排页。图表全部读取后端计算结果。
@@ -62,7 +62,7 @@ Compose恰好五服务，均带healthcheck。后端依赖db/redis健康，前端
 
 ## 数据与算法口径
 
-seed使用随机种子 `261104`：2025-09-17至2026-11-10共420天，三个厅共1,260行；大剧场容量800、黑匣子300、实验厅500。含三个角色、两个情景、一份实际计算结果、已确认编排、纪要和每日08:30站内报送计划。自然键存在时只读取，既不增加重复行，也不覆盖人工修改。
+seed使用随机种子 `261104`：2025-09-17至2026-11-10共420天，三个厅共1,260行；大剧场容量800、黑匣子300、实验厅500。含三个角色、三个情景、三份已确认单厅编排与纪要、一份示例共享池合并（每日容量18）、每日08:30站内报送计划。自然键存在时只读取，既不增加重复行，也不覆盖人工修改。
 
 ### 算法1：递归岭回归与时间验证
 
@@ -75,6 +75,16 @@ seed使用随机种子 `261104`：2025-09-17至2026-11-10共420天，三个厅�
 ### 算法2：残差分位区间与人力建议
 
 以保留14天递归预测的绝对残差排序，取 `ceil((n+1)×0.9)` 位（上限n）作为半径；预测上下界截断至 `[0,容量]`。引导员建议为 `max(2, ceil(上界/每名承载人数))`。这是近期残差区间，遇到漂移、相关残差和多步远期不保证90%覆盖；并非因果或销售承诺。
+
+### 算法3：共享引导员池合并
+
+三个厅共用一个引导员，单厅建议相加常超员。把同日期范围、不同厅的已完成预演明细合并，给定每日人力容量后生成整数人力编排：
+
+- 每厅保底 `2` 名；每日容量小于 `2×厅数` 时**拒绝生成**（HTTP 422）。单厅原建议少于2名、同厅重复、日期范围不齐、日期不连续同样拒绝。
+- 目标为最小化单日**最大未覆盖人数** `max(0, 区间上界 - 实配×每名承载人数)`，同分时场馆名靠前者先获得人力（场馆顺序：大剧场、黑匣子、实验厅）。实现按所有可达未覆盖值做精确二分，不做贪心近似。
+- 实配为整数；每日实配总和不超过每日容量，单厅实配不超过该厅原建议。
+- 对账：`需求 = Σ单厅原建议`，`缺口 = 需求 - 实配`，`闲置 = 每日容量 - 实配`，每日与合计都校验 `实配+缺口=需求` 与 `实配+闲置=每日容量`；任一不成立则合并不落地。
+- 合并只新增一条 `merges` 记录，原预测、运行、单厅编排与纪要均只读，不会被改写。
 
 ### 透视与定时报送
 
@@ -96,9 +106,9 @@ seed使用随机种子 `261104`：2025-09-17至2026-11-10共420天，三个厅�
 
 ## 核心实体与目录
 
-`AttendanceDataset → ForecastScenario → ForecastRun → StaffingPlan → Report → DeliverySchedule`。
+`AttendanceDataset → ForecastScenario → ForecastRun → StaffingPlan → Report → DeliverySchedule`，以及只读引用编排的 `SharedRoster`（merges 表）。
 
-每类实体分别有 `backend/src/{models,schemas,services,controllers,routes}/<实体>.py` 与前端 `src/{api,stores}/<实体>.ts`；数据库实体为datasets/scenarios/runs/plans/reports/schedules。delivery_snapshots是报送技术产物表，users/audit为横切表。文档载荷由dataclass模型持久化，身份/时间由参数化repository处理；结构SQL在 `backend/migrations/001_initial.sql`。
+每类实体分别有 `backend/src/{models,schemas,services,controllers,routes}/<实体>.py` 与前端 `src/{api,stores}/<实体>.ts`；数据库实体为datasets/scenarios/runs/plans/reports/schedules，合并记录存于merges，纯整数分配器位于 `services/allocation.py`。delivery_snapshots是报送技术产物表，users/audit为横切表。文档载荷由dataclass模型持久化，身份/时间由参数化repository处理；结构SQL在 `backend/migrations/001_initial.sql`。
 
 ```text
 backend/src/           路由、控制器、服务、模型、校验、中间件、配置
@@ -148,7 +158,7 @@ npm run dev -- --port 18203
 
 本地Vite将 `/api` 代理到19203。`/health` 同时验证数据库和Redis，不会把缺少Redis的本地开发会话标健康。
 
-测试脚本与记录位于批次目录 `test-artifacts/gb-2104/`。`tests/test_local.py` 是SQLite与TestClient验证，直接调用真实worker处理函数、只替换入队传输；不代表Redis/MySQL或容器验收。`tests/docker_acceptance.py` 只对真实栈运行，真实轮询后台计算及下一分钟定时报送，不包含inline替代，默认 `BASE_URL=http://127.0.0.1:19203`。
+共享池合并的单元与接口测试位于 `backend/tests/test_merge.py`（SQLite + TestClient，不替代容器验收）。测试脚本与记录位于批次目录 `test-artifacts/gb-2104/`。`tests/test_local.py` 是SQLite与TestClient验证，直接调用真实worker处理函数、只替换入队传输；不代表Redis/MySQL或容器验收。`tests/docker_acceptance.py` 只对真实栈运行，真实轮询后台计算及下一分钟定时报送，不包含inline替代，默认 `BASE_URL=http://127.0.0.1:19203`。
 
 当前状态是 **partial**：本地18项测试和Compose配置已通过；Docker socket访问、Vue依赖下载和headless浏览器环境受限，五服务健康、MySQL/Redis集成、前端构建和四张截图尚未完成。详见独立 `TESTING.md`，不能将本地验证等同于容器通过。
 
